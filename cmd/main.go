@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"math"
 
 	"github.com/spf13/cobra"
 	"googlemaps.github.io/maps"
@@ -15,6 +16,8 @@ var Lat float64
 var Lng float64
 var Keyword string
 var Type string
+var Limit int64
+var NextPageToken string
 
 func contacts(cmd *cobra.Command, args []string) {
 	mapsApiKey := os.Getenv("GOOGLE_MAPS_API_KEY")
@@ -45,43 +48,70 @@ func contacts(cmd *cobra.Command, args []string) {
 		r.Keyword = Keyword
 	}
 
-	places, err := c.NearbySearch(context.Background(), r)
-	if err != nil {
-		log.Fatalf("error searching nearby places: %s", err)
+	if NextPageToken != "" {
+		r = &maps.NearbySearchRequest{
+			PageToken: NextPageToken,
+		}
 	}
 
 	csvRes := [][]string{
-		{"name", "address", "phone", "url"},
+		{"name", "address", "phone", "url", "nextPageToken"},
 	}
+	pageToken := ""
+	i := int64(0)
+	totalIter := int64(math.Ceil(float64(Limit) / float64(20)))
 
-	for _, place := range places.Results {
-		placeDetails, err := c.PlaceDetails(context.Background(), &maps.PlaceDetailsRequest{
-			PlaceID: place.PlaceID,
-			Fields: []maps.PlaceDetailsFieldMask{
-				maps.PlaceDetailsFieldMaskName,
-				maps.PlaceDetailsFieldMaskFormattedAddress,
-				maps.PlaceDetailsFieldMaskFormattedPhoneNumber,
-				maps.PlaceDetailsFieldMaskURL,
-			},
-		})
+	for i <= totalIter {
+		if i > 0 {
+			r = &maps.NearbySearchRequest{
+				PageToken: pageToken,
+			}
+		}
+
+		places, err := c.NearbySearch(context.Background(), r)
 		if err != nil {
-			log.Printf("error reading place details: %s", err)
+			log.Printf("error searching nearby places: %s", err)
+			break
 		}
 
-
-		csvPlace := []string{
-			placeDetails.Name,
-			placeDetails.FormattedAddress,
-			placeDetails.FormattedPhoneNumber,
-			placeDetails.URL,
+		if places.NextPageToken == "" {
+			// This means there are no more results, just write what we have
+			break
 		}
-		csvRes = append(csvRes, csvPlace)
+		pageToken = places.NextPageToken
+
+		for _, place := range places.Results {
+			placeDetails, err := c.PlaceDetails(context.Background(), &maps.PlaceDetailsRequest{
+				PlaceID: place.PlaceID,
+				Fields: []maps.PlaceDetailsFieldMask{
+					maps.PlaceDetailsFieldMaskName,
+					maps.PlaceDetailsFieldMaskFormattedAddress,
+					maps.PlaceDetailsFieldMaskFormattedPhoneNumber,
+					maps.PlaceDetailsFieldMaskURL,
+				},
+			})
+			if err != nil {
+				log.Printf("error reading place details: %s", err)
+				continue
+			}
+
+			csvPlace := []string{
+				placeDetails.Name,
+				placeDetails.FormattedAddress,
+				placeDetails.FormattedPhoneNumber,
+				placeDetails.URL,
+				pageToken,
+			}
+			csvRes = append(csvRes, csvPlace)
+		}
+
+		// increment
+		i = i + 1
 	}
 
-	// TODO Read or create, then append results if already existed
-	f, err := os.Create("results.csv")
+	f, err := os.OpenFile("results.csv", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-		log.Fatalf("error creating file: %s", err)
+		log.Fatalf("error opening file: %s", err)
 	}
 	defer f.Close()
 
@@ -106,6 +136,16 @@ func main() {
 				log.Fatal("set GOOGLE_MAPS_API_KEY (export GOOGLE_MAPS_API_KEY=<your key>)")
 			}
 
+			if NextPageToken != "" {
+				return
+			}
+
+			if Lat == -100000 {
+				log.Fatal("--lat is a required flag")
+			}
+			if Lng == -100000 {
+				log.Fatal("--lng is a required flag")
+			}
 			if Keyword == "" && Type == "" {
 				log.Fatal("at least one of --keyword or --type need to be used")
 			}
@@ -116,12 +156,15 @@ func main() {
     },
 	}
 
-	rootCmd.Flags().Float64Var(&Lat, "lat", float64(0), "Latitude from which the search is based on")
-	rootCmd.Flags().Float64Var(&Lng, "lng", float64(0), "Longitude from which the search is based on")
+	rootCmd.Flags().Float64Var(&Lat, "lat", float64(-100000), "Latitude from which the search is based on")
+	rootCmd.Flags().Float64Var(&Lng, "lng", float64(-100000), "Longitude from which the search is based on")
 	rootCmd.MarkFlagRequired("lat")
 	rootCmd.MarkFlagRequired("lng")
 	rootCmd.Flags().StringVar(&Keyword, "keyword", "", "Keyword to search on")
 	rootCmd.Flags().StringVar(&Type, "type", "", "Type of business to search on; one of https://developers.google.com/maps/documentation/places/web-service/supported_types")
+	rootCmd.Flags().Int64Var(&Limit, "limit", int64(100), "Amount of contacts to lookup")
+	rootCmd.Flags().StringVar(&NextPageToken, "nextPageToken", "", "Token to lookup where you left off")
+
 
 	if err := rootCmd.Execute(); err != nil {
     fmt.Println(err)
